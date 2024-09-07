@@ -1,4 +1,4 @@
-![YESCOIN banner](https://github.com/user-attachments/assets/6c52d2b3-c510-4ecb-ac07-254c1d3f9e30)
+![YESCOIN banner](https://github.com/user-attachments/assets/334dabf4-d4e8-44e0-b0b1-46eeaf1ab1dd)
 
 # Tool Auto YESCOIN Bot NodeJS by Lượm Airdrop
 

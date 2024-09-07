@@ -4,8 +4,8 @@ const colors = require('colors');
 
 class YesCoinBot {
     constructor() {
-        this.accounts = this.loadAccounts( 'user.txt');
-        this.tokens = this.loadTokens( 'token.json');
+        this.accounts = this.loadAccounts('user.txt');
+        this.tokens = this.loadTokens('token.json');
         this.cekTaskEnable = 'n';
         this.upgradeMultiEnable = 'n';
         this.upgradeFillEnable = 'n';
@@ -89,9 +89,10 @@ class YesCoinBot {
 
     async getOrRefreshToken(encodedData, accountIndex) {
         let token = this.tokens[accountIndex];
-        if (!token) {
-            token = await this.login(encodedData, accountIndex);
+        if (token) {
+            return token;
         }
+        token = await this.login(encodedData, accountIndex);
         return token;
     }
 
@@ -220,7 +221,6 @@ class YesCoinBot {
                     return { success: true, collectedAmount: 0 };
                 }
             } else {
-                await this.log(`Mở rương thất bại: ${response.data.message}`, 'error');
                 return { success: false, collectedAmount: 0 };
             }
         } catch (error) {
@@ -416,13 +416,66 @@ class YesCoinBot {
         });
     }
 
+    async handleSwipeBot(token) {
+        const url = 'https://api.yescoin.gold/build/getAccountBuildInfo';
+        try {
+            const response = await axios.get(url, { headers: this.headers(token) });
+            const accountBuildInfo = response.data;
+            if (accountBuildInfo.code === 0) {
+                const { swipeBotLevel, openSwipeBot } = accountBuildInfo.data;
+                if (swipeBotLevel < 1) {
+                    const upgradeUrl = 'https://api.yescoin.gold/build/levelUp';
+                    const upgradeResponse = await axios.post(upgradeUrl, 4, { headers: this.headers(token) });
+                    if (upgradeResponse.data.code === 0) {
+                        await this.log('Mua SwipeBot thành công', 'success');
+                    } else {
+                        await this.log('Mua SwipeBot thất bại', 'error');
+                    }
+                }
+                if (swipeBotLevel >= 1 && !openSwipeBot) {
+                    const toggleUrl = 'https://api.yescoin.gold/build/toggleSwipeBotSwitch';
+                    const toggleResponse = await axios.post(toggleUrl, true, { headers: this.headers(token) });
+                    if (toggleResponse.data.code === 0) {
+                        await this.log('Bật SwipeBot thành công', 'success');
+                    } else {
+                        await this.log('Bật SwipeBot thất bại', 'error');
+                    }
+                }
+                if (swipeBotLevel >= 1 && openSwipeBot) {
+                    const offlineBonusUrl = 'https://api.yescoin.gold/game/getOfflineYesPacBonusInfo';
+                    const offlineBonusResponse = await axios.get(offlineBonusUrl, { headers: this.headers(token) });
+                    const offlineBonusInfo = offlineBonusResponse.data;
+                    if (offlineBonusInfo.code === 0 && offlineBonusInfo.data.length > 0) {
+                        const claimUrl = 'https://api.yescoin.gold/game/claimOfflineBonus';
+                        const claimData = {
+                            id: offlineBonusInfo.data[0].transactionId,
+                            createAt: Math.floor(Date.now() / 1000),
+                            claimType: 1,
+                            destination: ""
+                        };
+                        const claimResponse = await axios.post(claimUrl, claimData, { headers: this.headers(token) });
+                        if (claimResponse.data.code === 0) {
+                            await this.log(`Claim offline bonus thành công, nhận ${claimResponse.data.data.collectAmount} coins`, 'success');
+                        } else {
+                            await this.log('Claim offline bonus thất bại', 'error');
+                        }
+                    }
+                }
+            } else {
+                await this.log('Không thể lấy thông tin SwipeBot', 'error');
+            }
+        } catch (error) {
+            await this.log(`Lỗi xử lý SwipeBot: ${error.message}`, 'error');
+        }
+    }
+
     async main() {
         while (true) {
             for (let i = 0; i < this.accounts.length; i++) {
                 const accountIndex = (i + 1).toString();
                 const encodedData = this.accounts[i];
                 let token;
-                this.log('Tool được chia sẻ free tại kênh telegram:Lượm AIRDROP Auto (@autoairdropref)'.green); 
+                this.log('Tool được chia sẻ free tại kênh telegram:Lượm AIRDROP Auto (@autoairdropref)'.green);
                 try {
                     token = await this.getOrRefreshToken(encodedData, accountIndex);
                 } catch (error) {
@@ -466,12 +519,17 @@ class YesCoinBot {
                     await this.log('Không lấy được dữ liệu game!', 'error');
                     continue;
                 } else {
-                    const { specialBoxLeftRecoveryCount, coinPoolLeftRecoveryCount, singleCoinValue, singleCoinLevel, coinPoolRecoverySpeed } = gameInfo.data;
+                    const { specialBoxLeftRecoveryCount, coinPoolLeftRecoveryCount, singleCoinValue, singleCoinLevel, coinPoolRecoverySpeed, swipeBotLevel } = gameInfo.data;
                     await this.log(`Booster: Chest ${specialBoxLeftRecoveryCount} | Recovery ${coinPoolLeftRecoveryCount}`, 'info');
                     await this.log(`Multivalue: Level ${singleCoinValue}`, 'info');
                     await this.log(`Coin Limit: Level ${singleCoinLevel}`, 'info');
                     await this.log(`Fill Rate: Level ${coinPoolRecoverySpeed}`, 'info');
+                    await this.log(`Swipe Bot: Level ${swipeBotLevel}`, 'info');
                 }
+
+                await this.randomDelay();
+                await this.log('Kiểm tra và xử lý SwipeBot...', 'info');
+                await this.handleSwipeBot(token);
 
                 if (this.cekTaskEnable === 'y') {
                     await this.randomDelay();

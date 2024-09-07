@@ -2,32 +2,40 @@ const fs = require('fs');
 const axios = require('axios');
 const colors = require('colors');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 
 class YesCoinBot {
-    constructor() {
-        this.accounts = this.loadAccounts('user.txt');
-        this.proxies = this.loadProxies('proxy.txt');
-        this.tokens = this.loadTokens('token.json');
-        this.cekTaskEnable = 'n';
-        this.upgradeMultiEnable = 'n';
-        this.upgradeFillEnable = 'n';
-        this.maxLevel = 5;
+    constructor(accountIndex, account, proxy) {
+        this.accountIndex = accountIndex;
+        this.account = account;
+        this.proxy = proxy;
+        this.proxyIP = 'Unknown';
+        this.token = null;
+        this.config = JSON.parse(fs.readFileSync('config.json', 'utf-8'));
     }
 
-    loadAccounts(filePath) {
-        return fs.readFileSync(filePath, 'utf-8').replace(/\r/g, '').split('\n').filter(Boolean);
-    }
-
-    loadProxies(filePath) {
-        return fs.readFileSync(filePath, 'utf-8').replace(/\r/g, '').split('\n').filter(Boolean);
-    }
-
-    loadTokens(filePath) {
-        try {
-            return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        } catch (error) {
-            return {};
+    async log(msg, type = 'info') {
+        const timestamp = new Date().toLocaleTimeString();
+        const accountPrefix = `[Tài khoản ${this.accountIndex + 1}]`;
+        const ipPrefix = this.proxyIP ? `[${this.proxyIP}]` : '[Unknown IP]';
+        let logMessage = '';
+        
+        switch(type) {
+            case 'success':
+                logMessage = `${accountPrefix}${ipPrefix} ${msg}`.green;
+                break;
+            case 'error':
+                logMessage = `${accountPrefix}${ipPrefix} ${msg}`.red;
+                break;
+            case 'warning':
+                logMessage = `${accountPrefix}${ipPrefix} ${msg}`.yellow;
+                break;
+            default:
+                logMessage = `${accountPrefix}${ipPrefix} ${msg}`.blue;
         }
+        
+        console.log(logMessage);
+        await this.randomDelay();
     }
 
     headers(token) {
@@ -56,7 +64,7 @@ class YesCoinBot {
         return { code: decodedData };
     }
 
-    async login(encodedData, proxy, accountIndex) {
+    async login(encodedData, proxy) {
         const url = 'https://api-backend.yescoin.gold/user/login';
         const formattedPayload = this.formatLoginPayload(encodedData);
         const headers = {
@@ -79,7 +87,6 @@ class YesCoinBot {
             const response = await axios.post(url, formattedPayload, { headers, httpsAgent: proxyAgent });
             if (response.data.code === 0) {
                 const token = response.data.data.token;
-                this.saveToken(accountIndex, token);
                 return token;
             } else {
                 throw new Error(`Đăng nhập thất bại: ${response.data.message}`);
@@ -89,17 +96,33 @@ class YesCoinBot {
         }
     }
 
-    saveToken(accountIndex, token) {
-        this.tokens[accountIndex] = token;
-        fs.writeFileSync('token.json', JSON.stringify(this.tokens, null, 2));
+    async saveToken(accountIndex, token) {
+        let tokens = {};
+        if (fs.existsSync('token.json')) {
+            tokens = JSON.parse(fs.readFileSync('token.json', 'utf-8'));
+        }
+        tokens[accountIndex] = token;
+        fs.writeFileSync('token.json', JSON.stringify(tokens, null, 2));
     }
 
-    async getOrRefreshToken(encodedData, proxy, accountIndex) {
-        let token = this.tokens[accountIndex];
-        if (!token) {
-            token = await this.login(encodedData, proxy, accountIndex);
+    loadToken(accountIndex) {
+        if (fs.existsSync('token.json')) {
+            const tokens = JSON.parse(fs.readFileSync('token.json', 'utf-8'));
+            return tokens[accountIndex];
         }
-        return token;
+        return null;
+    }
+
+    async getOrRefreshToken(encodedData, proxy) {
+        const savedToken = this.loadToken(this.accountIndex);
+        if (savedToken) {
+            this.token = savedToken;
+            return this.token;
+        }
+        
+        this.token = await this.login(encodedData, proxy);
+        await this.saveToken(this.accountIndex, this.token);
+        return this.token;
     }
 
     async checkProxyIP(proxy) {
@@ -134,24 +157,6 @@ class YesCoinBot {
         } catch (error) {
             throw new Error(`Request failed: ${error.message}`);
         }
-    }
-
-    async log(msg, type = 'info') {
-        const timestamp = new Date().toLocaleTimeString();
-        switch(type) {
-            case 'success':
-                console.log(`[${timestamp}] [*] ${msg}`.green);
-                break;
-            case 'error':
-                console.log(`[${timestamp}] [!] ${msg}`.red);
-                break;
-            case 'warning':
-                console.log(`[${timestamp}] [*] ${msg}`.yellow);
-                break;
-            default:
-                console.log(`[${timestamp}] [*] ${msg}`.blue);
-        }
-        await this.randomDelay();
     }
 
     async randomDelay() {
@@ -250,11 +255,9 @@ class YesCoinBot {
                     await this.log(`Mở rương nhận được ${response.data.collectAmount} Coins`, 'success');
                     return { success: true, collectedAmount: response.data.collectAmount };
                 } else {
-                    await this.log('Không có rương!', 'warning');
                     return { success: true, collectedAmount: 0 };
                 }
             } else {
-                await this.log(`Mở rương thất bại: ${response.message}`, 'error');
                 return { success: false, collectedAmount: 0 };
             }
         } catch (error) {
@@ -400,144 +403,176 @@ class YesCoinBot {
         }
     }
 
-    async wait(seconds) {
-        for (let i = seconds; i > 0; i--) {
-            process.stdout.write(`\r${colors.cyan(`[*] Chờ ${Math.floor(i / 60)} phút ${i % 60} giây để tiếp tục`)}`.padEnd(80));
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-        console.log(`Bắt đầu vòng lặp mới...`);
-    }
-
-    quest() {
-        const readline = require('readline').createInterface({
-            input: process.stdin,
-            output: process.stdout
-        });
-
-        return new Promise((resolve) => {
-            readline.question("Bạn có muốn làm nhiệm vụ không? (y/n, mặc định n): ", (taskAnswer) => {
-                this.cekTaskEnable = taskAnswer.toLowerCase() === 'y' ? 'y' : 'n';
-
-                readline.question("Bạn có muốn nâng cấp multi không? (y/n, mặc định n): ", (multiAnswer) => {
-                    this.upgradeMultiEnable = multiAnswer.toLowerCase() === 'y' ? 'y' : 'n';
-
-                    readline.question("Bạn có muốn nâng cấp fill rate không? (y/n, mặc định n): ", (fillAnswer) => {
-                        this.upgradeFillEnable = fillAnswer.toLowerCase() === 'y' ? 'y' : 'n';
-
-                        if (this.upgradeMultiEnable === 'y' || this.upgradeFillEnable === 'y') {
-                            readline.question("Nhập lv tối đa để nâng cấp (mặc định: 5): ", (maxLevelAnswer) => {
-                                this.maxLevel = maxLevelAnswer ? parseInt(maxLevelAnswer) : 5;
-                                readline.close();
-                                resolve();
-                            });
+    async handleSwipeBot(token, proxy) {
+        const url = 'https://api.yescoin.gold/build/getAccountBuildInfo';
+        try {
+            const accountBuildInfo = await this.makeRequest('get', url, null, token, proxy);
+            if (accountBuildInfo.code === 0) {
+                const { swipeBotLevel, openSwipeBot } = accountBuildInfo.data;
+                if (swipeBotLevel < 1) {
+                    const upgradeUrl = 'https://api.yescoin.gold/build/levelUp';
+                    const upgradeResponse = await this.makeRequest('post', upgradeUrl, 4, token, proxy);
+                    if (upgradeResponse.code === 0) {
+                        await this.log('Mua SwipeBot thành công', 'success');
+                    } else {
+                        await this.log('Mua SwipeBot thất bại', 'error');
+                    }
+                }
+    
+                if (swipeBotLevel >= 1 && !openSwipeBot) {
+                    const toggleUrl = 'https://api.yescoin.gold/build/toggleSwipeBotSwitch';
+                    const toggleResponse = await this.makeRequest('post', toggleUrl, true, token, proxy);
+                    if (toggleResponse.code === 0) {
+                        await this.log('Bật SwipeBot thành công', 'success');
+                    } else {
+                        await this.log('Bật SwipeBot thất bại', 'error');
+                    }
+                }
+    
+                if (swipeBotLevel >= 1 && openSwipeBot) {
+                    const offlineBonusUrl = 'https://api.yescoin.gold/game/getOfflineYesPacBonusInfo';
+                    const offlineBonusInfo = await this.makeRequest('get', offlineBonusUrl, null, token, proxy);
+                    if (offlineBonusInfo.code === 0 && offlineBonusInfo.data.length > 0) {
+                        const claimUrl = 'https://api.yescoin.gold/game/claimOfflineBonus';
+                        const claimData = {
+                            id: offlineBonusInfo.data[0].transactionId,
+                            createAt: Math.floor(Date.now() / 1000),
+                            claimType: 1,
+                            destination: ""
+                        };
+                        const claimResponse = await this.makeRequest('post', claimUrl, claimData, token, proxy);
+                        if (claimResponse.code === 0) {
+                            await this.log(`Claim offline bonus thành công, nhận ${claimResponse.data.collectAmount} coins`, 'success');
                         } else {
-                            this.maxLevel = 5;
-                            readline.close();
-                            resolve();
+                            await this.log('Claim offline bonus thất bại', 'error');
                         }
-                    });
-                });
-            });
-        });
+                    }
+                }
+            } else {
+                await this.log('Không thể lấy thông tin SwipeBot', 'error');
+            }
+        } catch (error) {
+            await this.log(`Lỗi xử lý SwipeBot: ${error.message}`, 'error');
+        }
     }
 
     async main() {
-        while (true) {
-            for (let i = 0; i < this.accounts.length; i++) {
-                const accountIndex = (i + 1).toString();
-                const encodedData = this.accounts[i];
-                const proxy = this.proxies[i] || this.proxies[0];
-                let proxyIP = 'Unknown';
-                this.log('Tool được chia sẻ free tại kênh telegram:Lượm AIRDROP Auto (@autoairdropref)'.green); 
-                try {
-                    proxyIP = await this.checkProxyIP(proxy);
-                } catch (error) {
-                    await this.log(`Error checking proxy IP: ${error.message}`, 'error');
-                    continue;
-                }
-                let token;
-                try {
-                    token = await this.getOrRefreshToken(encodedData, proxy, accountIndex);
-                } catch (error) {
-                    await this.log(`Không thể lấy token cho tài khoản ${accountIndex}: ${error.message}`, 'error');
-                    continue;
-                }
+        try {
+            this.proxyIP = await this.checkProxyIP(this.proxy);
+        } catch (error) {
+            await this.log(`Error checking proxy IP: ${error.message}`, 'error');
+            return;
+        }
 
+        try {
+            this.token = await this.getOrRefreshToken(this.account, this.proxy);
+        } catch (error) {
+            await this.log(`Không thể lấy token: ${error.message}`, 'error');
+            return;
+        }
+        this.log('Tool được chia sẻ free tại kênh telegram:Lượm AIRDROP Auto (@autoairdropref)'.green);
+
+        await this.performTasks();
+    }
+
+    async performTasks() {
+        await this.randomDelay();
+        const nickname = await this.getuser(this.token, this.proxy);
+        await this.log(`Tài khoản: ${nickname}`, 'info');
+        
+        await this.randomDelay();
+        const squadInfo = await this.getSquadInfo(this.token, this.proxy);
+        if (squadInfo && squadInfo.data.isJoinSquad) {
+            const squadTitle = squadInfo.data.squadInfo.squadTitle;
+            const squadMembers = squadInfo.data.squadInfo.squadMembers;
+            await this.log(`Squad: ${squadTitle} | ${squadMembers} Thành viên`, 'info');
+        } else {
+            await this.log('Squad: Bạn không ở trong Squad, gia nhập Lượm Airdrop Auto.', 'warning');
+            await this.randomDelay();
+            const joinResult = await this.joinSquad(this.token, "t.me/autoairdropref", this.proxy);
+            if (joinResult) {
+                await this.log(`Squad: ${nickname} gia nhập Squad thành công !`, 'success');
+            } else {
+                await this.log(`Squad: ${nickname} gia nhập Squad thất bại !`, 'error');
+            }
+        }
+
+        await this.randomDelay();
+        const balance = await this.getAccountInfo(this.token, this.proxy);
+        if (balance === null) {
+            await this.log('Balance: Không đọc được balance', 'error');
+        }
+
+        const currentAmount = balance.data.currentAmount.toLocaleString().replace(/,/g, '.');
+        await this.randomDelay();
+        const gameInfo = await this.getAccountBuildInfo(this.token, this.proxy);
+        if (gameInfo === null) {
+            await this.log('Không lấy được dữ liệu game!', 'error');
+        } else {
+            const { specialBoxLeftRecoveryCount, coinPoolLeftRecoveryCount, singleCoinValue, singleCoinLevel, coinPoolRecoverySpeed, swipeBotLevel } = gameInfo.data;
+            await this.log(`Balance: ${currentAmount} | Booster: Chest ${specialBoxLeftRecoveryCount} | Recovery ${coinPoolLeftRecoveryCount}`, 'info');
+            await this.log(`Multivalue: ${singleCoinValue} | Coin Limit: ${singleCoinLevel} | Fill Rate: ${coinPoolRecoverySpeed} | Swipe Bot: ${swipeBotLevel}`, 'info');
+        }
+
+        await this.randomDelay();
+        await this.handleSwipeBot(this.token, this.proxy);
+
+        if (this.config.TaskEnable) {
+            await this.randomDelay();
+            await this.processTasks(this.token, this.proxy);
+        }
+
+        if (this.config.upgradeMultiEnable) {
+            await this.randomDelay();
+            await this.upgradeLevel(this.token, gameInfo.data.singleCoinValue, this.config.maxLevel, '1', this.proxy);
+        }
+
+        if (this.config.upgradeFillEnable) {
+            await this.randomDelay();
+            await this.upgradeLevel(this.token, gameInfo.data.coinPoolRecoverySpeed, this.config.maxLevel, '2', this.proxy);
+        }
+
+        await this.randomDelay();
+        const collectInfo = await this.getGameInfo(this.token, this.proxy);
+        if (collectInfo === null) {
+            await this.log('Không lấy được dữ liệu game!', 'error');
+        } else {
+            const { singleCoinValue, coinPoolLeftCount } = collectInfo.data;
+            await this.log(`Năng lượng còn lại ${coinPoolLeftCount}`, 'info');
+
+            if (coinPoolLeftCount > 0) {
                 await this.randomDelay();
-                const nickname = await this.getuser(token, proxy);
-                await this.log(`========== Tài khoản ${accountIndex} | ${nickname} | ip: ${proxyIP} ==========`, 'info');
-                
-                await this.randomDelay();
-                const squadInfo = await this.getSquadInfo(token, proxy);
-                if (squadInfo && squadInfo.data.isJoinSquad) {
-                    const squadTitle = squadInfo.data.squadInfo.squadTitle;
-                    const squadMembers = squadInfo.data.squadInfo.squadMembers;
-                    await this.log(`Bạn đã gia nhập ${squadTitle} | ${squadMembers} Thành viên`, 'info');
+                const amount = Math.floor(coinPoolLeftCount / singleCoinValue);
+                const collectResult = await this.collectCoin(this.token, amount, this.proxy);
+                if (collectResult && collectResult.code === 0) {
+                    const collectedAmount = collectResult.data.collectAmount;
+                    await this.log(`Tap thành công, nhận được ${collectedAmount} coins`, 'success');
                 } else {
-                    await this.log('Squad: Bạn không ở trong Squad, gia nhập Lượm Airdrop Auto.', 'warning');
-                    await this.randomDelay();
-                    const joinResult = await this.joinSquad(token, "t.me/autoairdropref", proxy);
-                    if (joinResult) {
-                        await this.log(`Squad: ${nickname} gia nhập Squad thành công !`, 'success');
-                    } else {
-                        await this.log(`Squad: ${nickname} gia nhập Squad thất bại !`, 'error');
-                    }
+                    await this.log('Tap không thành công!', 'error');
                 }
+            }
+        }
 
+        await this.randomDelay();
+        if (gameInfo && gameInfo.data.specialBoxLeftRecoveryCount > 0) {
+            if (await this.useSpecialBox(this.token, this.proxy)) {
                 await this.randomDelay();
-                const balance = await this.getAccountInfo(token, proxy);
-                if (balance === null) {
-                    await this.log('Balance: Không đọc được balance', 'error');
-                    continue;
-                } else {
-                    const currentAmount = balance.data.currentAmount.toLocaleString().replace(/,/g, '.');
-                    await this.log(`Balance: ${currentAmount}`, 'info');
-                }
+                const collectedAmount = await this.attemptCollectSpecialBox(this.token, 2, 240, this.proxy);
+            }
+        }
 
+        await this.randomDelay();
+        const updatedGameInfo = await this.getAccountBuildInfo(this.token, this.proxy);
+        if (updatedGameInfo && updatedGameInfo.data.coinPoolLeftRecoveryCount > 0) {
+            if (await this.recoverCoinPool(this.token, this.proxy)) {
                 await this.randomDelay();
-                const gameInfo = await this.getAccountBuildInfo(token, proxy);
-                if (gameInfo === null) {
-                    await this.log('Không lấy được dữ liệu game!', 'error');
-                    continue;
-                } else {
-                    const { specialBoxLeftRecoveryCount, coinPoolLeftRecoveryCount, singleCoinValue, singleCoinLevel, coinPoolRecoverySpeed } = gameInfo.data;
-                    await this.log(`Booster: Chest ${specialBoxLeftRecoveryCount} | Recovery ${coinPoolLeftRecoveryCount}`, 'info');
-                    await this.log(`Multivalue: Level ${singleCoinValue}`, 'info');
-                    await this.log(`Coin Limit: Level ${singleCoinLevel}`, 'info');
-                    await this.log(`Fill Rate: Level ${coinPoolRecoverySpeed}`, 'info');
-                }
-
-                if (this.cekTaskEnable === 'y') {
-                    await this.randomDelay();
-                    await this.log('Bắt đầu làm nhiệm vụ...', 'info');
-                    await this.processTasks(token, proxy);
-                }
-
-                if (this.upgradeMultiEnable === 'y') {
-                    await this.randomDelay();
-                    await this.log('Bắt đầu nâng cấp multi...', 'info');
-                    await this.upgradeLevel(token, gameInfo.data.singleCoinValue, this.maxLevel, '1', proxy);
-                }
-
-                if (this.upgradeFillEnable === 'y') {
-                    await this.randomDelay();
-                    await this.log('Bắt đầu nâng cấp Fill Rate....', 'info');
-                    await this.upgradeLevel(token, gameInfo.data.coinPoolRecoverySpeed, this.maxLevel, '2', proxy);
-                }
-
-                await this.randomDelay();
-                const collectInfo = await this.getGameInfo(token, proxy);
-                if (collectInfo === null) {
-                    await this.log('Không lấy được dữ liệu game!', 'error');
-                    continue;
-                } else {
-                    const { singleCoinValue, coinPoolLeftCount } = collectInfo.data;
-                    await this.log(`Năng lượng còn lại ${coinPoolLeftCount}`, 'info');
-
+                const updatedCollectInfo = await this.getGameInfo(this.token, this.proxy);
+                if (updatedCollectInfo) {
+                    const { coinPoolLeftCount, singleCoinValue } = updatedCollectInfo.data;
                     if (coinPoolLeftCount > 0) {
                         await this.randomDelay();
                         const amount = Math.floor(coinPoolLeftCount / singleCoinValue);
-                        const collectResult = await this.collectCoin(token, amount, proxy);
+                        const collectResult = await this.collectCoin(this.token, amount, this.proxy);
                         if (collectResult && collectResult.code === 0) {
                             const collectedAmount = collectResult.data.collectAmount;
                             await this.log(`Tap thành công, nhận được ${collectedAmount} coins`, 'success');
@@ -546,56 +581,81 @@ class YesCoinBot {
                         }
                     }
                 }
-
-                await this.randomDelay();
-                await this.log('Kiếm tra số lượng rương còn lại...', 'info');
-                if (gameInfo && gameInfo.data.specialBoxLeftRecoveryCount > 0) {
-                    if (await this.useSpecialBox(token, proxy)) {
-                        await this.randomDelay();
-                        await this.log('Bắt đầu thu thập...', 'info');
-                        const collectedAmount = await this.attemptCollectSpecialBox(token, 2, 240, proxy);
-                    }
-                } else {
-                    await this.log('Không có rương nào!', 'warning');
-                }
-
-                await this.randomDelay();
-                await this.log('Bắt đầu recovery...', 'info');
-                const updatedGameInfo = await this.getAccountBuildInfo(token, proxy);
-                if (updatedGameInfo && updatedGameInfo.data.coinPoolLeftRecoveryCount > 0) {
-                    if (await this.recoverCoinPool(token, proxy)) {
-                        await this.randomDelay();
-                        const updatedCollectInfo = await this.getGameInfo(token, proxy);
-                        if (updatedCollectInfo) {
-                            const { coinPoolLeftCount, singleCoinValue } = updatedCollectInfo.data;
-                            if (coinPoolLeftCount > 0) {
-                                await this.randomDelay();
-                                const amount = Math.floor(coinPoolLeftCount / singleCoinValue);
-                                const collectResult = await this.collectCoin(token, amount, proxy);
-                                if (collectResult && collectResult.code === 0) {
-                                    const collectedAmount = collectResult.data.collectAmount;
-                                    await this.log(`Tap thành công, nhận được ${collectedAmount} coins`, 'success');
-                                } else {
-                                    await this.log('Tap không thành công!', 'error');
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    await this.log('Đã dùng hết recovery!', 'warning');
-                }
-
-                await this.randomDelay();
-                await this.log('Kiểm tra rương miễn phí xuất hiện...', 'info');
-                const freeChestCollectedAmount = await this.attemptCollectSpecialBox(token, 1, 200, proxy);
             }
+        }
 
-            await this.wait(2 * 60);
+        await this.randomDelay();
+        const freeChestCollectedAmount = await this.attemptCollectSpecialBox(this.token, 1, 200, this.proxy);
+
+        if (!isMainThread) {
+            parentPort.postMessage('taskComplete');
         }
     }
 }
 
-const bot = new YesCoinBot();
-bot.quest().then(() => {
-    bot.main();
-});
+if (isMainThread) {
+    const accounts = fs.readFileSync('user.txt', 'utf-8').replace(/\r/g, '').split('\n').filter(Boolean);
+    const proxies = fs.readFileSync('proxy.txt', 'utf-8').replace(/\r/g, '').split('\n').filter(Boolean);
+    const config = JSON.parse(fs.readFileSync('config.json', 'utf-8'));
+
+    const numThreads = Math.min(config.maxThreads || 10, accounts.length);
+    let activeWorkers = 0;
+
+    async function processCycle() {
+        console.log('Tool được chia sẻ free tại kênh telegram:Lượm AIRDROP Auto (@autoairdropref)..'.magenta);
+        let accountQueue = [...accounts];
+
+        function startWorker() {
+            if (accountQueue.length === 0) {
+                if (activeWorkers === 0) {
+                    console.log('Hoàn thành tất cả tài khoản, nghỉ 1 chút nhé.'.green);
+                    setTimeout(processCycle, 60000);
+                }
+                return;
+            }
+
+            const accountIndex = accounts.length - accountQueue.length;
+            const account = accountQueue.shift();
+            const proxy = proxies[accountIndex % proxies.length];
+
+            activeWorkers++;
+
+            const worker = new Worker(__filename, {
+                workerData: {
+                    accountIndex: accountIndex,
+                    account: account,
+                    proxy: proxy
+                }
+            });
+
+            worker.on('message', (message) => {
+                if (message === 'taskComplete') {
+                    worker.terminate();
+                }
+            });
+
+            worker.on('error', (error) => {
+                console.error(`Worker error: ${error}`.red);
+                activeWorkers--;
+                startWorker();
+            });
+
+            worker.on('exit', (code) => {
+                if (code !== 0) {
+                    console.error(`Luồng bị dừng với mã ${code}`.red);
+                }
+                activeWorkers--;
+                startWorker();
+            });
+        }
+
+        for (let i = 0; i < numThreads; i++) {
+            startWorker();
+        }
+    }
+    processCycle();
+
+} else {
+    const bot = new YesCoinBot(workerData.accountIndex, workerData.account, workerData.proxy);
+    bot.main().catch(console.error);
+}
